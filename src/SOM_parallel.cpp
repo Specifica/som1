@@ -20,9 +20,9 @@ using namespace std;
 
 struct dataStruct {
 public:
-	int data_size;
-	int data_dimensions;
-	float *data;
+	int size;
+	int dimensions;
+	float *data[];
 };
 
 /* Generic functions */
@@ -62,15 +62,15 @@ int LoadData(string filename, dataStruct &data)
 	ifstream in(filename);
 	if (in.is_open()) {
 		// first line holds the data size
-		in >> data.data_size;
+		in >> data.size;
 		// second line holds the data dimension
-		in >> data.data_dimensions;
+		in >> data.dimensions;
 		// The two above are used to allocate the proper memory, since OpenCL requires arrays
-		data.data = (float *)malloc(data.data_dimensions*data.data_size*sizeof(float));
+		data.data = (float *)malloc(data.dimensions*data.size*sizeof(float));
 
-		for (int i = 0; i < data.data_size; i++) {
-			for (int j = 0; j < data.data_dimensions; j++) {
-				in >> data.data[data.data_dimensions*i + j];
+		for (int i = 0; i < data.size; i++) {
+			for (int j = 0; j < data.dimensions; j++) {
+				in >> data.data[data.dimensions*i + j];
 			}
 		}
 
@@ -91,13 +91,13 @@ int WriteData(string filename, dataStruct data)
 	ofstream out(filename);
 	if (out.is_open()) {
 		// first line holds the data size
-		out << data.data_size << "\n";
+		out << data.size << "\n";
 		// second line holds the data dimension
-		out << data.data_dimensions << "\n";
+		out << data.dimensions << "\n";
 		// The rest is data
-		for (int i = 0; i < data.data_size; i++) {
-			for (int j = 0; j < data.data_dimensions; j++) {
-				out << data.data[data.data_dimensions*i + j] << "\t";
+		for (int i = 0; i < data.size; i++) {
+			for (int j = 0; j < data.dimensions; j++) {
+				out << data.data[data.dimensions*i + j] << "\t";
 			}
 			out << "\n";
 		}
@@ -145,16 +145,18 @@ string GetDeviceName(cl_device_id id)
 */
 int main(int argc, char** argv) {
 
-	if (argc != 3) {
-		return(CERR("Usage: SOM_parallel <path to filename in> <path to filename out>"));
+	if (argc != 4) {
+		return(CERR("Usage: SOM_parallel <path to data in> <path to weights in> <path to filename out>"));
 	}
 
-	// Load the kernel source code into the array source_str
+	/*
+		Load the kernel source code into the array source_str
+	*/
 	FILE *fp;
 	char *source_str;
 	size_t source_size;
 
-	fp = fopen("C:\\Users\\dzerm\\Documents\\GithubProjects\\SOM\\src\\kernel.cl", "r");
+	fp = fopen("C:\\Users\\dzerm\\Documents\\GitHubProjects\\SOM\\src\\kernel.cl", "r");
 	if (!fp) {
 		fprintf(stderr, "Failed to load kernel.\n");
 		exit(1);
@@ -187,7 +189,7 @@ int main(int argc, char** argv) {
 	}
 
 	// Let the user choose which platform
-	cout << "Select a platform. (1, 2, ...) :\t";
+	cout << "Select a platform. (1, 2, ...) : ";
 	int platformSelection;
 	cin >> platformSelection;
 
@@ -218,7 +220,7 @@ int main(int argc, char** argv) {
 		cout << "\t (" << (i + 1) << ") : " << GetDeviceName(deviceIds[i]) << endl;
 	}
 
-	// Let the user choose which platform
+	// Let the user choose which device
 	cout << "Select a device. (1, 2, ...) :\t";
 	int deviceSelection;
 	cin >> deviceSelection;
@@ -245,23 +247,33 @@ int main(int argc, char** argv) {
 	cl_command_queue command_queue = clCreateCommandQueue(context, deviceID, 0, &ret);
 	CheckOpenCLError(ret);
 
-	// Read the input file
-	string filein = argv[1];
+	/*
+		Read the input file(s)
+	*/
+	string datafilein = argv[1];
 	dataStruct data_in;
-	if (LoadData(filein, data_in) == -1) {
+	if (LoadData(datafilein, data_in) == -1) {
 		return(CERR("Error reading file"));
 	}
 
-	int data_size = data_in.data_dimensions * data_in.data_size;
+	string weightfilein = argv[2];
+	dataStruct weight_in;
+	if (LoadData(weightfilein, weight_in) == -1) {
+		return(CERR("Error reading file"));
+	}
 
 	// Create memory buffers on the device for each vector 
-	cl_mem a_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY, data_size * sizeof(float), NULL, &ret);
+	cl_mem data_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY, data_in.size * sizeof(cl_float4), NULL, &ret);
 	CheckOpenCLError(ret);
-	cl_mem b_mem_obj = clCreateBuffer(context, CL_MEM_WRITE_ONLY, data_size * sizeof(float), NULL, &ret);
+	cl_mem weight_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_float4), NULL, &ret);
+	CheckOpenCLError(ret);
+	cl_mem dist_mem_obj = clCreateBuffer(context, CL_MEM_READ_WRITE, data_in.size * sizeof(float), NULL, &ret);
 	CheckOpenCLError(ret);
 
 	// Copy the data_in to their respective memory buffers
-	ret = clEnqueueWriteBuffer(command_queue, a_mem_obj, CL_FALSE, 0, data_size * sizeof(float), data_in.data, 0, NULL, NULL);
+	ret = clEnqueueWriteBuffer(command_queue, data_mem_obj, CL_FALSE, 0, data_in.size * sizeof(cl_float4), data_in.data, 0, NULL, NULL);
+	CheckOpenCLError(ret);
+	ret = clEnqueueWriteBuffer(command_queue, weight_mem_obj, CL_FALSE, 0, sizeof(cl_float4), weight_in.data[0], 0, NULL, NULL);
 	CheckOpenCLError(ret);
 
 	// Create a program from the kernel source
@@ -287,32 +299,34 @@ int main(int argc, char** argv) {
 	}
 
 	// Create the OpenCL kernel
-	cl_kernel kernel = clCreateKernel(program, "add_one", &ret);
+	cl_kernel kernel = clCreateKernel(program, "euclidean_dist", &ret);
 	CheckOpenCLError(ret);
 
 	// Set the arguments of the kernel
-	ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&a_mem_obj);
+	ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&data_mem_obj);
 	CheckOpenCLError(ret);
-	ret = clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&b_mem_obj);
+	ret = clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&weight_mem_obj);
+	CheckOpenCLError(ret);
+	ret = clSetKernelArg(kernel, 2, sizeof(cl_mem), (void *)&dist_mem_obj);
 	CheckOpenCLError(ret);
 
 	// Execute the OpenCL kernel on the list
 	size_t local_item_size = 16; // Divide work items into groups of 64
-	size_t numLocalGroups = ceil(data_size / local_item_size);
+	size_t numLocalGroups = ceil(data_in.size / local_item_size);
 	size_t global_item_size = local_item_size * numLocalGroups;
 	ret = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL,
 		&global_item_size, nullptr, 0, NULL, NULL);
 
 	// Read the memory buffer C on the device to the local variable C
-	float *data_out_temp = (float*)malloc(sizeof(float)*data_size);
-	ret = clEnqueueReadBuffer(command_queue, b_mem_obj, CL_TRUE, 0,
-		data_size * sizeof(float), data_out_temp, 0, NULL, NULL);
+	float *data_out_temp = (float*)malloc(sizeof(float)*data_in.size);
+	ret = clEnqueueReadBuffer(command_queue, weight_mem_obj, CL_TRUE, 0,
+		data_in.size * sizeof(float), data_out_temp, 0, NULL, NULL);
 
-	string fileout = argv[2];
+	string fileout = argv[3];
 	dataStruct data_out;
-	data_out.data_dimensions = 4;
-	data_out.data_size = 12;
-	data_out.data = (float *)malloc(data_out.data_dimensions*data_out.data_size*sizeof(float));
+	data_out.dimensions = data_in.dimensions;
+	data_out.size = data_in.size;
+	data_out.data = (float *)malloc(data_out.size*sizeof(float));
 	data_out.data = data_out_temp;
 
 	if (WriteData(fileout, data_out) == -1) {
@@ -324,8 +338,9 @@ int main(int argc, char** argv) {
 	ret = clFinish(command_queue);
 	ret = clReleaseKernel(kernel);
 	ret = clReleaseProgram(program);
-	ret = clReleaseMemObject(a_mem_obj);
-	ret = clReleaseMemObject(b_mem_obj);
+	ret = clReleaseMemObject(data_mem_obj);
+	ret = clReleaseMemObject(weight_mem_obj);
+	ret = clReleaseMemObject(dist_mem_obj);
 	ret = clReleaseCommandQueue(command_queue);
 	ret = clReleaseContext(context);
 
